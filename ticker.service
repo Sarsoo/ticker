@@ -1,0 +1,13 @@
+[Unit]
+Description=Ticker
+
+[Service]
+# Command to execute when the service is started
+ExecStart=/usr/bin/python3 /home/pi/ticker/main.py
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Type=simple
+
+[Install]
+WantedBy=default.target
