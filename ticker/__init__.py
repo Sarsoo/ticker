@@ -1,11 +1,12 @@
 import logging
+import os
 from ticker.ticker import Ticker
 
 logger = logging.getLogger(__name__)
 fmlogger = logging.getLogger('fmframework')
 logger.setLevel('DEBUG')
 
-file_handler = logging.FileHandler("ticker.log")
+file_handler = logging.FileHandler(f"{os.environ.get('TICKER_LOG_DIR', '')}ticker.log")
 file_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(name)s - %(funcName)s - %(message)s'))
 logger.addHandler(file_handler)
 fmlogger.addHandler(file_handler)

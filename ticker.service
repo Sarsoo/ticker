@@ -7,6 +7,8 @@ ExecStart=/usr/bin/python3 /home/pi/ticker/main.py
 
 [Service]
 Environment=PYTHONUNBUFFERED=1
+User=pi
+EnvironmentFile=/home/pi/ticker/ticker-env
 Type=simple
 
 [Install]
