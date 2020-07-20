@@ -27,7 +27,11 @@ def main():
                   button_pins=button_pins,
 
                   fm_username=os.environ.get('FM_USERNAME', 'sarsoo'),
-                  fm_key=os.environ['FM_KEY'])
+                  fm_key=os.environ['FM_KEY'],
+
+                  spot_client=os.environ['SPOT_CLIENT'],
+                  spot_secret=os.environ['SPOT_SECRET'],
+                  spot_refresh=os.environ['SPOT_REFRESH'])
     tick.start()
 
 

@@ -1,21 +1,31 @@
 from queue import Queue
-from threading import Thread
+from threading import Thread, Lock
 from time import sleep
 import logging
-from datetime import date
+from datetime import date, datetime
+from enum import Enum
 
 from RPi import GPIO
 from RPLCD.gpio import CharLCD
 from gpiozero import TrafficLights, TonalBuzzer, Button
+from gpiozero.tones import Tone
 from requests import Session
 
-from fmframework.net.network import Network, LastFMNetworkException
+from fmframework.net.network import Network as FMNetwork, LastFMNetworkException
+from spotframework.net.network import Network as SpotNetwork, NetworkUser, SpotifyNetworkException
 
 from ticker.display import DisplayItem
 
 logger = logging.getLogger(__name__)
 
 lcd_width = 16
+
+net_thread_interval = 10 * 60
+display_thread_interval = 0.1
+
+
+class DisplayLocation(Enum):
+    home = 1
 
 
 class Ticker:
@@ -30,7 +40,11 @@ class Ticker:
                  button_pins,
 
                  fm_username: str,
-                 fm_key: str):
+                 fm_key: str,
+
+                 spot_client: str,
+                 spot_secret: str,
+                 spot_refresh: str):
         self.lcd = CharLCD(numbering_mode=GPIO.BCM,
                            cols=lcd_width,
                            rows=2,
@@ -41,6 +55,7 @@ class Ticker:
         self.leds = TrafficLights(red=red_led_pin, yellow=yellow_led_pin, green=green_led_pin, pwm=True)
 
         self.buzzer = TonalBuzzer(buzzer_pin)
+        self.buzzer_lock = Lock()
 
         self.notif_button = Button(button_pins[0])
         self.notif_button.when_activated = self.handle_notif_click
@@ -50,33 +65,41 @@ class Ticker:
 
         self.button3 = Button(button_pins[2])
         self.button4 = Button(button_pins[3])
+        self.button4.when_held = self.handle_network_hold
 
-        self.idle_text = dict()
+        self.location = DisplayLocation.home
+
+        self.pulled_idle_text = dict()
 
         self.notification_queue = Queue()
         self.display_queue = Queue()
         self.display_thread = Thread(target=self.display_worker, name='display', daemon=True)
 
-        self.rsession = Session()
-        self.fmnet = Network(username=fm_username, api_key=fm_key)
+        self.network_active = True
 
-        self.puller_thread = Thread(target=self.puller_worker, name='puller', daemon=True)
+        self.rsession = Session()
+        self.fmnet = FMNetwork(username=fm_username, api_key=fm_key)
+        self.spotnet = SpotNetwork(NetworkUser(client_id=spot_client,
+                                               client_secret=spot_secret,
+                                               refresh_token=spot_refresh)).refresh_access_token()
+
+        self.network_pull_thread = Thread(target=self.network_pull_worker, name='puller', daemon=True)
 
     def start(self):
         logger.info('starting ticker')
 
         self.lcd.clear()
         self.display_thread.start()
-        self.puller_thread.start()
+        self.network_pull_thread.start()
         self.set_status(green=True)
 
     def set_status(self,
                    green: bool = False,
-                   yellow: bool = False,
-                   red: bool = False):
+                   yellow: bool = False):
         self.leds.green.value = 1 if green else 0
         self.leds.yellow.value = 1 if yellow else 0
-        self.leds.red.value = 1 if red else 0
+
+    # HANDLERS
 
     def handle_notif_click(self):
         if not self.notification_queue.empty():
@@ -84,46 +107,70 @@ class Ticker:
                 self.display_queue.put(self.notification_queue.get())
             self.leds.red.off()
         else:
-            self.queue_text('No Notifications', '', interrupt=True, time=2)
+            self.queue_text('No Notifications', '', interrupt=True, time=1)
 
-    def puller_worker(self):
+    def handle_network_hold(self):
+        self.network_active = not self.network_active
+
+        logger.info(f'setting network activity {self.network_active}')
+
+        if self.network_active:
+            self.set_status(green=True)
+        else:
+            self.set_status(yellow=True)
+
+        self.beep()
+
+    # THREADS
+
+    def network_pull_worker(self):
+        """thread function for pulling network display items and update cache"""
         while True:
+            if self.network_active:
+                try:
+                    total = self.fmnet.get_scrobble_count_from_date(input_date=date.today())
+                    logger.debug(f'loaded daily scrobbles {total}')
 
-            try:
-                total = self.fmnet.get_scrobble_count_from_date(input_date=date.today())
+                    # self.queue_text('Scrobbles Today', total)
+                    self.pulled_idle_text['daily_scrobbles'] = DisplayItem('Scrobbles Today', str(total))
+                except LastFMNetworkException as e:
+                    logger.exception(e)
+                    self.queue_text('Last.FM Error', f'{e.http_code}, {e.error_code}, {e.message}')
 
-                logger.debug(f'loaded daily scrobbles {total}')
+                try:
+                    playlist_total = len(self.spotnet.get_user_playlists())
+                    logger.debug(f'loaded daily scrobbles {playlist_total}')
 
-                self.queue_text('Scrobbles Today', total)
-                self.idle_text['daily_scrobbles'] = DisplayItem('Scrobbles', str(total))
-            except LastFMNetworkException as e:
-                logger.exception(e)
-                self.queue_text('Last.FM Error', f'{e.http_code}, {e.error_code}, {e.message}')
+                    self.pulled_idle_text['playlist_count'] = DisplayItem('Playlists', str(playlist_total))
+                except SpotifyNetworkException as e:
+                    logger.exception(e)
+                    self.queue_text('Spotify Error', f'{e.http_code}, {e.message}')
 
-            sleep(30)
+            sleep(net_thread_interval)
 
     def display_worker(self):
+        """LCD controller, reads queue for new items to display or roll over idle items"""
         while True:
             if not self.display_queue.empty():
                 display_item = self.display_queue.get(block=False)
                 logger.info(f'dequeued {display_item}, size {self.display_queue.qsize()}')
 
                 self.write_display_item(display_item)
-
                 self.display_queue.task_done()
 
             else:
-                if len(self.idle_text) > 0:
+                if len(self.idle_text) > 0 and self.location == DisplayLocation.home:
                     for key, item in self.idle_text.items():
-                        if self.display_queue.empty():
+                        if not self.display_queue.empty():
                             break
 
                         logger.debug(f'writing {key}')
                         self.write_display_item(item)
-
                 else:
                     self.write_to_lcd(['Ticker...', ''])
-            sleep(0.1)
+            sleep(display_thread_interval)
+
+    # DISPLAY
 
     def write_display_item(self, display_item):
         """write display item to LCD now"""
@@ -168,3 +215,25 @@ class Ticker:
                 framebuffer[row] = s[i:i + lcd_width]
                 self.write_to_lcd(framebuffer)
                 sleep(delay)
+
+    @property
+    def idle_text(self) -> dict:
+        """merge last pulled with system pullable text items"""
+        system_idle = dict()
+
+        now = datetime.now()
+        system_idle['date'] = DisplayItem(title=now.strftime('%d.%m.%y'), message=now.strftime('%R'))
+
+        return {**system_idle, **self.pulled_idle_text}
+
+    # SOUND
+
+    def beep(self):
+        self.buzzer_lock.acquire()
+
+        self.buzzer.play(Tone("A4"))
+        sleep(0.1)
+        self.buzzer.stop()
+        sleep(0.1)
+
+        self.buzzer_lock.release()
