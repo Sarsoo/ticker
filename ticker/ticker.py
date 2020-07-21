@@ -52,6 +52,7 @@ class Ticker:
                            pin_e=lcd_e,
                            pins_data=lcd_data,
                            auto_linebreaks=True)
+        self.lcd.cursor_mode = 'hide'
         self.leds = TrafficLights(red=red_led_pin, yellow=yellow_led_pin, green=green_led_pin, pwm=True)
 
         self.buzzer = TonalBuzzer(buzzer_pin)
@@ -136,6 +137,32 @@ class Ticker:
                 except LastFMNetworkException as e:
                     logger.exception(e)
                     self.queue_text('Last.FM Error', f'{e.http_code}, {e.error_code}, {e.message}')
+
+                try:
+                    artists = self.fmnet.get_top_artists(period=FMNetwork.Range.WEEK, limit=3)
+                    logger.debug(f'loaded top artists')
+
+                    self.pulled_idle_text['weekly_artists'] = DisplayItem('Weekly Artists',
+                                                                          ', '.join([str(i) for i in artists]),
+                                                                          iterations=1)
+                except LastFMNetworkException as e:
+                    logger.exception(e)
+                    self.queue_text('Last.FM Error', f'{e.http_code}, {e.error_code}, {e.message}')
+
+                # try:
+                #     from_time = date.today()
+                #     from_time = datetime(year=from_time.year, month=from_time.month, day=1)
+                #
+                #     to_time = datetime.now()
+                #
+                #     total = len(self.fmnet.get_recent_tracks(from_time=from_time, to_time=to_time, page_limit=200))
+                #     logger.debug(f'loaded monthly scrobbles {total}')
+                #
+                #     # self.queue_text('Scrobbles Today', total)
+                #     self.pulled_idle_text['monthly_scrobbles'] = DisplayItem('This Month', str(total))
+                # except LastFMNetworkException as e:
+                #     logger.exception(e)
+                #     self.queue_text('Last.FM Error', f'{e.http_code}, {e.error_code}, {e.message}')
 
                 try:
                     playlist_total = len(self.spotnet.get_user_playlists())
